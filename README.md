@@ -122,21 +122,45 @@ class UserModel(faust.Record, serializer='avro_users'):
 
 ### Explicit send entrypoints
 
-Sending is **not** limited to the built-in 5-second timers. Two dedicated Faust CLI commands are registered in `example/users/agents.py`:
+Sending is **not** limited to the built-in 5-second timers. Two dedicated Faust CLI commands are defined as `AppCommand` classes in `example/users/cli.py`:
 
-- `faust -A example.app send_user '<json>'`  — validates and sends a simple user to `avro_users`
-- `faust -A example.app send_advance_user '<json>'`  — validates and sends an advance user to `advance_avro_users`
+- `faust -A example.app send-user '<json>'`  — validates and sends a simple user to `avro_users`
+- `faust -A example.app send-advance-user '<json>'`  — validates and sends an advance user to `advance_avro_users`
+
+> Note: click registers faust commands with dashes, so the invocable names are `send-user` / `send-advance-user` (not `send_user`). The `make send-user-event` / `make send-advance-user-event` targets wrap these for you.
+
+**They are available on the real CLI path with no extra imports.** `example/app.py` imports `example.users.cli` at the end of the module (after `app` is defined), so when `faust -A example.app <cmd>` runs faust's `find_app` → `prepare_app` (which imports `example.app`), the `send-user` / `send-advance-user` subcommands register into the faust `cli` group at import time. Venusian autodiscovery (`autodiscover=True`, `origin='example'`) stays enabled as Faust's normal mechanism; the explicit import is a belt-and-suspenders guarantee so the commands register even on interpreters where venusian's package walk is unavailable.
 
 Both commands run **payload validation before sending**:
 
-- Missing required fields → clear error (lists missing + required)
-- Extra/unexpected fields → clear error (lists unexpected + allowed)
-- Wrong value types (e.g. `age` as a string, `first_name` as int) → clear error
-- Invalid JSON → clear parse error
+- Missing required fields → `click.ClickException` (lists missing + required)
+- Extra/unexpected fields → `click.ClickException` (lists unexpected + allowed)
+- Wrong value types (e.g. `age` as a string, `first_name` as int) → `click.ClickException`
+- Invalid JSON → `click.BadParameter` (clear parse error)
 
 Validation logic lives in `example/codecs/avro.py::validate_user_payload` and is also exposed as `UserModel.from_payload` / `AdvanceUserModel.from_payload` for programmatic use.
 
-The two `@app.timer` tasks (`publish_users`, `advance_publish_users`) continue to publish hardcoded samples every 5 seconds, but now delegate to the same `send_simple_user` / `send_advance_user` functions used by the CLI — so the timer and manual paths share validation, serializer selection and topic routing.
+The two `@app.timer` tasks (`publish_users`, `advance_publish_users`) continue to publish hardcoded samples every 5 seconds, but now delegate to the same `send_simple_user` / `send_advance_user` helpers used by the CLI commands — so the timer and manual paths share validation, serializer selection and topic routing.
+
+### Verification of the Users link
+
+The Users link is verified at three levels, all repeatable from the repo:
+
+1. **Command registration, real path (unit, `tests/test_users_cli.py::TestCommandRegistrationViaAppImport`)** — spawns a *clean* interpreter that imports **only** `example.app` (not `example.users.cli`) and asserts `send-user` / `send-advance-user` appear in the faust `cli` group. A subprocess is used deliberately: the rest of the suite imports `example.users.cli` to exercise the command classes, so an in-process check would always pass even if `example.app` did not wire the commands in. The subprocess also asserts the commands are *not* present before `example.app` is imported, so the test cannot pass for the wrong reason.
+2. **Command entry behaviour (unit, `tests/test_users_cli.py`)** — drives the `send_user` / `send_advance_user` command objects' `run` methods directly, covering valid payload, missing field, extra field, wrong type and invalid JSON (each asserts the right click error / `OK:` echo and that `topic.send` is/isn't called).
+3. **Codec + wiring (unit, `tests/test_users_cli.py`)** — resolves `avro_users` / `avro_advance_users` through `faust.serializers.codecs.get_codec` (the real `faust.codecs` entry-point path) and asserts they are the **same** `FaustSerializer` instances the send helpers pass to `topic.send`; and that each topic is bound to its model, so the send path and the consume path provably share one Avro link.
+4. **End-to-end (compose smoke, `scripts/smoke_users.sh`)** — against the running stack it runs `faust -A example.app send-user` / `send-advance-user`, greps the worker logs for the consumed events, and checks that invalid JSON is rejected. Run it with `make smoke-users` (after `docker-compose up -d`).
+
+```bash
+docker-compose up -d
+make smoke-users
+# Expected (abridged):
+#   OK: simple user sent to topic 'avro_users'
+#   OK: advance user sent to topic 'advance_avro_users'
+#   OK: both events reached their consumer agents
+#   OK: invalid JSON rejected
+#   SMOKE PASS: Users explicit-command -> Avro codec -> topic -> consumer link works
+```
 
 ## Minimum Verification Steps
 
@@ -197,13 +221,16 @@ Or locally with `tox` (requires a virtualenv with the project installed):
 cd faust-project && tox
 ```
 
-The suite covers:
+The suite covers (`tests/test_users.py` and `tests/test_users_cli.py`):
 - `UserModel` / `AdvanceUserModel` carry the correct serializer names
 - `USER_TOPIC_CONFIG` maps simple/advance to the correct topics, subjects and field sets
 - `validate_user_payload` rejects missing, extra and wrong-typed fields with clear messages
 - `UserModel.from_payload` / `AdvanceUserModel.from_payload` validate before construction
 - `send_simple_user` / `send_advance_user` hit the **correct** topic with the **correct** serializer (mocked) — and refuse to send on bad payloads
 - `users` / `advance_users` agents correctly consume events put on their streams
+- **the `send_user` / `send_advance_user` command entries themselves** (their `run` methods): valid payload dispatches to the right helper/serializer and echoes `OK:`; missing / extra / wrong-type / invalid-JSON inputs raise the right click errors — proving the CLI command contract, not just the helper below it
+- **the commands are registered** in the faust `cli` group as `send-user` / `send-advance-user`
+- **the `avro_users` / `avro_advance_users` codecs resolve** through `faust.serializers.codecs.get_codec` to the same `FaustSerializer` instances the send path uses, and each topic is bound to its model (send ⇄ consume share one Avro link)
 - `page_views` tests run unchanged (regression guard)
 
 ## Achievements

@@ -166,14 +166,60 @@ class TestParsePayload:
         assert "Invalid JSON payload" in exc.value.message
 
 
-class TestCommandRegistration:
-    def test_send_user_registered_in_cli(self):
-        from faust.cli.base import cli
-        assert 'send-user' in cli.commands
+class TestCommandRegistrationViaAppImport:
+    """Layer 1 — prove the REAL `faust -A example.app` import path registers the
+    commands, *without* this test importing `example.users.cli` itself.
 
-    def test_send_advance_user_registered_in_cli(self):
-        from faust.cli.base import cli
-        assert 'send-advance-user' in cli.commands
+    Why a subprocess: the rest of this file (and the rest of the suite) imports
+    `example.users.cli` to exercise the command classes, so by the time any
+    in-process test runs the commands are already registered in the shared
+    `faust.cli.base.cli` group — an in-process ``'send-user' in cli.commands``
+    check would therefore pass even if `example.app` did not wire the commands
+    in at all (a false positive). A clean interpreter that imports ONLY
+    `example.app` is the only honest way to prove the wiring. `tests.conftest`
+    is imported first solely for the Python 3.12 shims that let faust import
+    locally; it does not import `example.users.cli`.
+    """
+
+    @staticmethod
+    def _run_in_clean_interpreter(script: str):
+        import os
+        import subprocess
+        import sys
+        env = dict(os.environ)
+        env['SIMPLE_SETTINGS'] = env.get('SIMPLE_SETTINGS') or 'settings'
+        env['PYTHONPATH'] = os.pathsep.join(
+            p for p in [os.getcwd(), env.get('PYTHONPATH', '')] if p
+        )
+        return subprocess.run(
+            [sys.executable, '-c', script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=os.getcwd(),
+            timeout=60,
+        )
+
+    def test_importing_only_example_app_registers_both_commands(self):
+        script = (
+            "import tests.conftest; "
+            "from faust.cli.base import cli; "
+            "assert 'send-user' not in cli.commands, "
+            "'precondition: command registered before example.app import'; "
+            "import example.app; "
+            "assert 'send-user' in cli.commands, "
+            "'send-user not registered by importing example.app'; "
+            "assert 'send-advance-user' in cli.commands, "
+            "'send-advance-user not registered by importing example.app'; "
+            "print('OK')"
+        )
+        result = self._run_in_clean_interpreter(script)
+        assert result.returncode == 0, (
+            "expected `import example.app` alone to register the Users "
+            f"commands.\nreturncode={result.returncode}\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        assert 'OK' in result.stdout
 
 
 class TestCodecRegistration:
