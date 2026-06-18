@@ -1,0 +1,26 @@
+Metadata-Version: 2.4
+Name: faust-example
+Version: 1.2.2
+Summary: Faust example with Docker Compose
+Home-page: 
+Author: Marcos Schroh
+Author-email: schrohm@gmail.com
+Classifier: Programming Language :: Python
+Requires-Dist: colorlog>=3.1.4
+Requires-Dist: dataclasses-avroschema
+Requires-Dist: faust
+Requires-Dist: python-schema-registry-client
+Requires-Dist: yarl<1.6.0,>=1.0
+Requires-Dist: multidict<5.0,>=4.5
+Requires-Dist: simple-settings
+Requires-Dist: typing-extensions
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: requires-dist
+Dynamic: summary
+
+
+    Example running Faust with Docker Compose (zookeeper, kafka and schema-registry)
+    

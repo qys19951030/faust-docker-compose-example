@@ -42,10 +42,28 @@ create-topic:
 create-page-view-topic:
 	@$(MAKE) create-topic topic-name=page_views
 
+create-avro-users-topic:
+	@$(MAKE) create-topic topic-name=avro_users
+
+create-advance-avro-users-topic:
+	@$(MAKE) create-topic topic-name=advance_avro_users
+
+create-all-user-topics: create-avro-users-topic create-advance-avro-users-topic
+
 list-topics:
 	docker-compose exec kafka kafka-topics --list --zookeeper zookeeper:32181
 
 # Faust commands related
 send-page-view-event:
 	docker-compose exec -e SIMPLE_SETTINGS=settings ${service} faust -A ${worker} send page_views '${payload}'
+
+send-user-event:
+	docker-compose exec -e SIMPLE_SETTINGS=settings ${service} faust -A ${worker} send_user '${payload}'
+
+send-advance-user-event:
+	docker-compose exec -e SIMPLE_SETTINGS=settings ${service} faust -A ${worker} send_advance_user '${payload}'
+
+# Run tests inside the container (requires services running)
+test:
+	docker-compose exec -e SIMPLE_SETTINGS=settings ${service} python -m pytest tests/ -v
 

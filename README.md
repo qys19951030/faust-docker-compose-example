@@ -48,17 +48,50 @@ Useful ENVIRONMENT variables that you may change:
 
 ## Commands
 
-* Start application: `make run-dev`. This command start both the *Page Views* and *Leader Election* applications
+* Start application: `make run-dev`. This command starts the Kafka cluster, Schema Registry and all Faust applications (Page Views, Leader Election, Users)
 * Stop and remove containers: `make clean`
 * List topics: `make list-topics`
-* Send events to page_view topic/agent: `make send-page-view-event payload='{"id": "foo", "user": "bar"}'`
+* Run tests (services must already be running): `make test`
+
+### Send events
+
+**Page Views** (JSON, built-in `faust send`):
+```bash
+make send-page-view-event payload='{"id": "foo", "user": "bar"}'
+```
+
+**Simple User** (Avro, topic `avro_users`, fields: `first_name`, `last_name`):
+```bash
+make send-user-event payload='{"first_name": "Alice", "last_name": "Smith"}'
+```
+
+**Advance User** (Avro, topic `advance_avro_users`, fields: `first_name`, `last_name`, `age`):
+```bash
+make send-advance-user-event payload='{"first_name": "Bob", "last_name": "Jones", "age": 30}'
+```
+
+### Create topics explicitly (optional — Faust auto-creates them)
+```bash
+make create-page-view-topic
+make create-avro-users-topic
+make create-advance-avro-users-topic
+# or
+make create-all-user-topics
+```
 
 ## Avro Schemas, Custom Codecs and Serializers
 
-Because we want to be sure that the message that we encode are valid we use [Avro Schemas](https://docs.oracle.com/database/nosql-12.1.3.1/GettingStartedGuide/avroschemas.html).
+Because we want to be sure that the messages we encode are valid we use [Avro Schemas](https://docs.oracle.com/database/nosql-12.1.3.1/GettingStartedGuide/avroschemas.html).
 Avro is used to define the data schema for a record's value. This schema describes the fields allowed in the value, along with their data types.
 
-For our demostration in the `Users` application we are using the following schema:
+The `Users` example provides **two** separate Avro-based paths — a "simple user" and an "advance user" — each with its own topic, serializer and schema. The mapping is centralized in `example/codecs/avro.py` (see `USER_TOPIC_CONFIG`):
+
+| Path | Kafka Topic | Model | Serializer Name | Schema Subject | Required Fields |
+|------|-------------|-------|-----------------|----------------|-----------------|
+| Simple User | `avro_users` | `UserModel` | `avro_users` | `users` | `first_name`, `last_name` |
+| Advance User | `advance_avro_users` | `AdvanceUserModel` | `avro_advance_users` | `advance_users` | `first_name`, `last_name`, `age` |
+
+The simple-user Avro schema is:
 
 ```json
 {
@@ -72,11 +105,12 @@ For our demostration in the `Users` application we are using the following schem
 }
 ```
 
-In order to use `avro schemas` with `Faust` we need to define a custom codec, a custom serializer and be able to talk with the `schema-registry`.
-You can find the custom codec called `avro_users` registered using the [codec registation](https://faust.readthedocs.io/en/latest/userguide/models.html#codec-registry) approach described by faust.
-The [AvroSerializer](https://github.com/marcosschroh/faust-docker-compose-example/blob/fix/replace-helpers-with-schemaregistry-library/faust-project/example/codecs/serializers.py#L8) is in charge to `encode` and `decode` messages using the [schema registry client](https://github.com/marcosschroh/python-schema-registry-client).
+The advance-user schema is derived automatically from `AdvanceUserModel` via `dataclasses-avroschema` and adds the `age` (int) field.
 
-Now the final step is to integrate the faust model with the `AvroSerializer`.
+In order to use `avro schemas` with `Faust` we need to define a custom codec, a custom serializer and be able to talk with the `schema-registry`.
+The codecs `avro_users` and `avro_advance_users` are registered via the setup.py entry-points (`faust.codecs` group). The `FaustSerializer` from [python-schema-registry-client](https://github.com/marcosschroh/python-schema-registry-client) handles encoding and decoding against the Schema Registry.
+
+Integrating the Faust model with the Avro serializer is done by pointing the `serializer` class kwarg at the registered codec name:
 
 ```python
 # users.models
@@ -86,15 +120,91 @@ class UserModel(faust.Record, serializer='avro_users'):
     last_name: str
 ```
 
-Now our application is able to send and receive message using arvo schemas!!!! :-)
+### Explicit send entrypoints
+
+Sending is **not** limited to the built-in 5-second timers. Two dedicated Faust CLI commands are registered in `example/users/agents.py`:
+
+- `faust -A example.app send_user '<json>'`  — validates and sends a simple user to `avro_users`
+- `faust -A example.app send_advance_user '<json>'`  — validates and sends an advance user to `advance_avro_users`
+
+Both commands run **payload validation before sending**:
+
+- Missing required fields → clear error (lists missing + required)
+- Extra/unexpected fields → clear error (lists unexpected + allowed)
+- Wrong value types (e.g. `age` as a string, `first_name` as int) → clear error
+- Invalid JSON → clear parse error
+
+Validation logic lives in `example/codecs/avro.py::validate_user_payload` and is also exposed as `UserModel.from_payload` / `AdvanceUserModel.from_payload` for programmatic use.
+
+The two `@app.timer` tasks (`publish_users`, `advance_publish_users`) continue to publish hardcoded samples every 5 seconds, but now delegate to the same `send_simple_user` / `send_advance_user` functions used by the CLI — so the timer and manual paths share validation, serializer selection and topic routing.
+
+## Minimum Verification Steps
+
+After cloning the repo, you can verify **all three example end-to-end paths** (page_views, users, advance_users) with these commands:
+
+```bash
+# 1. Build and start everything (Kafka, ZK, SR, Faust worker)
+make run-dev
+# (wait ~30s for all services to be healthy)
+
+# 2. In a second terminal, verify topics exist
+make list-topics
+# Expected: page_views, avro_users, advance_avro_users among the listed topics
+
+# 3. Send a Page Views event
+make send-page-view-event payload='{"id": "home", "user": "alice"}'
+# Watch faust-project logs for: "Event received. Page view Id home"
+
+# 4. Send a Simple User event
+make send-user-event payload='{"first_name": "Alice", "last_name": "Smith"}'
+# Watch faust-project logs for:
+#   "Sent simple user to topic 'avro_users': ..."
+#   "Event received in topic avro_users"
+#   "First Name: Alice, last name Smith"
+
+# 5. Send an Advance User event
+make send-advance-user-event payload='{"first_name": "Bob", "last_name": "Jones", "age": 30}'
+# Watch faust-project logs for:
+#   "Sent advance user to topic 'advance_avro_users': ..."
+#   "Event received in topic advance_avro_users"
+#   "First Name: Bob, last name Jones, age 30"
+
+# 6. Try validation errors (expect clear failures, not silent drops):
+
+# Missing 'age' for advance user — should ERROR, not send anything
+make send-advance-user-event payload='{"first_name": "Bad", "last_name": "User"}'
+# Expected error: "Missing required field(s) for 'advance' user: ['age']"
+
+# Extra field 'email' for simple user — should ERROR
+make send-user-event payload='{"first_name": "Bad", "last_name": "User", "email": "x@y"}'
+# Expected error: "Unexpected field(s) for 'simple' user: ['email']"
+
+# 7. Run the automated test suite
+make test
+```
 
 ## Tests
 
-Run tests with `tox`. Make sure that you have installed it.
+Run tests in the container (services must be running so imports resolve):
 
 ```bash
-tox
+make test
 ```
+
+Or locally with `tox` (requires a virtualenv with the project installed):
+
+```bash
+cd faust-project && tox
+```
+
+The suite covers:
+- `UserModel` / `AdvanceUserModel` carry the correct serializer names
+- `USER_TOPIC_CONFIG` maps simple/advance to the correct topics, subjects and field sets
+- `validate_user_payload` rejects missing, extra and wrong-typed fields with clear messages
+- `UserModel.from_payload` / `AdvanceUserModel.from_payload` validate before construction
+- `send_simple_user` / `send_advance_user` hit the **correct** topic with the **correct** serializer (mocked) — and refuse to send on bad payloads
+- `users` / `advance_users` agents correctly consume events put on their streams
+- `page_views` tests run unchanged (regression guard)
 
 ## Achievements
 

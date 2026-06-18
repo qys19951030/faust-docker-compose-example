@@ -1,0 +1,6 @@
+[console_scripts]
+example = example.app:main
+
+[faust.codecs]
+avro_advance_users = example.codecs.avro:avro_advance_user_codec
+avro_users = example.codecs.avro:avro_user_codec
