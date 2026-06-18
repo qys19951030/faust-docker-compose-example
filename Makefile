@@ -58,10 +58,15 @@ send-page-view-event:
 	docker-compose exec -e SIMPLE_SETTINGS=settings ${service} faust -A ${worker} send page_views '${payload}'
 
 send-user-event:
-	docker-compose exec -e SIMPLE_SETTINGS=settings ${service} faust -A ${worker} send_user '${payload}'
+	docker-compose exec -e SIMPLE_SETTINGS=settings ${service} faust -A ${worker} send-user '${payload}'
 
 send-advance-user-event:
-	docker-compose exec -e SIMPLE_SETTINGS=settings ${service} faust -A ${worker} send_advance_user '${payload}'
+	docker-compose exec -e SIMPLE_SETTINGS=settings ${service} faust -A ${worker} send-advance-user '${payload}'
+
+# End-to-end smoke for the Users Avro link (explicit command -> codec -> topic -> consumer).
+# Requires the compose stack to already be up (`docker-compose up -d`).
+smoke-users:
+	bash scripts/smoke_users.sh
 
 # Run tests inside the container (requires services running)
 test:
